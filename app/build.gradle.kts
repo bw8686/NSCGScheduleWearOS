@@ -44,23 +44,48 @@ android {
 dependencies {
     implementation(libs.play.services.wearable)
     implementation(platform(libs.compose.bom))
+    
+    // Compose core  
     implementation(libs.ui)
     implementation(libs.ui.graphics)
     implementation(libs.ui.tooling.preview)
-    implementation(libs.compose.material)
-    implementation(libs.compose.foundation)
-    implementation(libs.wear.tooling.preview)
     implementation(libs.activity.compose)
-    implementation(libs.core.splashscreen)
-    implementation(libs.tiles)
-    implementation(libs.tiles.material)
-    implementation(libs.tiles.tooling.preview)
-    implementation(libs.horologist.compose.tools)
-    implementation(libs.horologist.tiles)
-    implementation(libs.watchface.complications.data.source.ktx)
+    
+    // Wear Compose M3 (Material 3 Expressive)
+    implementation("androidx.wear.compose:compose-material3:1.5.6")
+    implementation("androidx.wear.compose:compose-foundation:1.5.6")
+    implementation("androidx.wear.compose:compose-ui-tooling:1.5.6")
+    implementation("androidx.core:core-splashscreen:1.2.0")
+
+    // Protolayout for Tiles
+    implementation("androidx.wear.protolayout:protolayout-expression:1.3.0")
+    implementation("androidx.wear.protolayout:protolayout:1.3.0")
+    implementation("androidx.wear.protolayout:protolayout-material3:1.3.0")
+    
+    // Wear Watchface - base library
+    implementation("androidx.wear.watchface:watchface:1.2.1")
+    
+    // Complications support (required for ComplicationDataSourceService)
+    implementation("androidx.wear.watchface:watchface-complications-data:1.2.1")
+    implementation("androidx.wear.watchface:watchface-complications-data-source:1.2.1")
+    implementation("androidx.wear.watchface:watchface-complications-data-source-ktx:1.2.1")
+    
+    // Tiles support (required for TileService and Material3 Tiles)
+    implementation("androidx.wear.tiles:tiles:1.5.0")
+    implementation("androidx.wear.tiles:tiles-material:1.5.0")
+    implementation("androidx.wear.tiles:tiles-renderer:1.5.0")
+    implementation("androidx.wear.tiles:tiles-tooling-preview:1.5.0")
+    
+    // Horologist (Google's Wear OS toolkit - for tile helpers)
+    implementation("com.google.android.horologist:horologist-tiles:0.6.20")
+    implementation("com.google.android.horologist:horologist-compose-tools:0.6.20")
+    
+    // Coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
+    
+    // Testing / debug
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.ui.test.junit4)
     debugImplementation(libs.ui.tooling)
-    debugImplementation(libs.ui.test.manifest)
-    debugImplementation(libs.tiles.tooling)
 }
