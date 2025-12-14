@@ -91,6 +91,9 @@ data class OpenRequest(
     val endMillis: Long
 )
 
+// Reuse this constant instead of allocating repeatedly
+private val DAY_NAMES = listOf("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
 private fun parseOpenRequest(intent: Intent?): OpenRequest? {
     val kindRaw = intent?.getStringExtra(EXTRA_OPEN_KIND) ?: return null
     val startRaw = intent.getStringExtra(EXTRA_OPEN_START_MILLIS) ?: return null
@@ -142,31 +145,35 @@ fun WearApp(openRequestFlow: MutableStateFlow<OpenRequest?>) {
     var requestedLesson by remember { mutableStateOf<Lesson?>(null) }
     var requestedExam by remember { mutableStateOf<Exam?>(null) }
     
-    // Check connection and request data on launch
+    // Check connection and request data on launch (non-blocking)
     LaunchedEffect(Unit) {
-        repository.checkPhoneConnection()
-        if (timetable == null || examTimetable == null) {
-            repository.requestDataFromPhone()
+        // Launch in background to avoid blocking UI
+        scope.launch {
+            repository.checkPhoneConnection()
+            // Only request if we have no cached data at all
+            if (timetable == null || examTimetable == null) {
+                repository.requestDataFromPhone()
+            }
         }
     }
 
-    // Debug log: show device now and timetable/exam sizes
-    LaunchedEffect(timetable, examTimetable) {
-        val now = java.time.LocalDateTime.now()
-        Log.d("MainActivity", "WearApp started - now=$now, timetableDays=${timetable?.days?.size ?: 0}, examCount=${examTimetable?.exams?.size ?: 0}, conn=${connectionStatus.name}")
-    }
+    // (debug logging removed to reduce overhead in hot paths)
 
     val zone = ZoneId.systemDefault()
     var activeExamEvent by remember { mutableStateOf<ScheduleMerger.Event?>(null) }
 
     // Keep schedule-derived state updated without doing heavy work in recomposition.
     // Also auto-opens the exams page when an exam is active or imminent.
-    LaunchedEffect(timetable, examTimetable) {
+    // NOTE: Removed timetable/examTimetable from dependencies to prevent continuous re-triggering
+    LaunchedEffect(Unit) {
         while (true) {
             val nowMillis = System.currentTimeMillis()
+            // Capture current state values to avoid race conditions
+            val currentTimetable = timetable
+            val currentExamTimetable = examTimetable
             val events = ScheduleMerger.buildEvents(
-                timetable = timetable,
-                examTimetable = examTimetable,
+                timetable = currentTimetable,
+                examTimetable = currentExamTimetable,
                 nowMillis = nowMillis,
                 zoneId = zone,
                 horizonDays = 14
@@ -188,10 +195,7 @@ fun WearApp(openRequestFlow: MutableStateFlow<OpenRequest?>) {
             }
 
             if (shouldOpenExams && pagerState.currentPage != 1) {
-                Log.d(
-                    "MainActivity",
-                    "Auto-opening exams page: now=$nowMillis current=${current?.kind} next=${next?.kind}"
-                )
+                // Auto-open exams page when needed
                 pagerState.scrollToPage(1)
             }
 
@@ -216,12 +220,15 @@ fun WearApp(openRequestFlow: MutableStateFlow<OpenRequest?>) {
     }
 
     // Handle deep-link style opens from tile/complication.
-    LaunchedEffect(openRequest, timetable, examTimetable) {
+    LaunchedEffect(openRequest) {
         val req = openRequest ?: return@LaunchedEffect
         val nowMillis = System.currentTimeMillis()
+        // Capture current state to avoid triggering on every data update
+        val currentTimetable = timetable
+        val currentExamTimetable = examTimetable
         val events = ScheduleMerger.buildEvents(
-            timetable = timetable,
-            examTimetable = examTimetable,
+            timetable = currentTimetable,
+            examTimetable = currentExamTimetable,
             nowMillis = nowMillis,
             zoneId = zone,
             horizonDays = 14
@@ -441,72 +448,67 @@ fun TimetablePage(
             onRequestedLessonConsumed()
         }
     }
+    // Memoize today's section + lessons (depends only on timetable & date)
+    val (todaySectionIndex, todayLessons) = remember(timetable, nowDate) {
+        if (timetable == null) Pair(-1, emptyList<Lesson>())
+        else {
+            val todayName = DAY_NAMES[nowDate.dayOfWeek.value - 1]
+            val idx = timetable.days.indexOfFirst { it.getDayName().contains(todayName, ignoreCase = true) }
+            val lessons = timetable.days.getOrNull(idx)?.lessons ?: emptyList()
+            Pair(idx, lessons)
+        }
+    }
+
+    // Memoize current/next lesson indices — depend on current time and today's lessons
+    val currentLessonIndex = remember(nowTime, todayLessons) {
+        todayLessons.indexOfFirst { lesson ->
+            val start = lesson.getParsedStartTime()
+            val end = lesson.getParsedEndTime()
+            start != null && end != null && ((nowTime.isAfter(start) && nowTime.isBefore(end)) || (nowTime.isAfter(start.minusMinutes(5)) && nowTime.isBefore(end)))
+        }
+    }
+
+    val nextLessonIndex = remember(nowTime, todayLessons) {
+        todayLessons.indexOfFirst { lesson ->
+            val start = lesson.getParsedStartTime()
+            start != null && start.isAfter(nowTime)
+        }
+    }
 
     // Auto-scroll to today's section when timetable loads
     LaunchedEffect(timetable) {
-        if (timetable != null && timetable.days.isNotEmpty()) {
-            val dayNames = listOf("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
-            val todayName = dayNames[nowDate.dayOfWeek.value - 1]
-            val todaySectionIndex = timetable.days.indexOfFirst { it.getDayName().contains(todayName, ignoreCase = true) }
-            val todayLessons = timetable.days.getOrNull(todaySectionIndex)?.lessons ?: emptyList()
-            // Find current lesson index using Timetable helper first (for consistency), otherwise recalc
-            val currentLessonObj = timetable?.getCurrentLesson()
-            val currentLessonIndex = if (currentLessonObj != null) {
-                todayLessons.indexOfFirst { it.startTime == currentLessonObj.startTime && it.endTime == currentLessonObj.endTime }
-            } else {
-                todayLessons.indexOfFirst { lesson ->
-                    val start = lesson.getParsedStartTime()
-                    val end = lesson.getParsedEndTime()
-                    start != null && end != null && nowTime.isAfter(start.minusMinutes(5)) && nowTime.isBefore(end)
-                }
-            }
-            // Find next lesson index (after now)
-            val nextLessonIndex = todayLessons.indexOfFirst { lesson ->
-                val start = lesson.getParsedStartTime()
-                start != null && start.isAfter(nowTime)
-            }
-            // Scroll to current lesson if present, else next lesson, else first lesson of today
+        if (timetable != null && timetable.days.isNotEmpty() && todaySectionIndex >= 0) {
             // Compute the absolute scroll index for this day's list
-            if (todaySectionIndex >= 0) {
-                // Start with the top-level header (TIMETABLE) which is index 0
-                var absoluteIndex = 1 // list contains header at position 0
-                // Accumulate sizes for all days before 'todaySectionIndex'
-                for (i in 0 until todaySectionIndex) {
-                    absoluteIndex += 1 // day header
-                    absoluteIndex += 1 // spacing item
-                    absoluteIndex += (timetable.days.getOrNull(i)?.lessons?.size ?: 0)
-                }
-
-                // Now we're at the beginning of today's section
-                val dayHeaderIndex = absoluteIndex
-                val spacerIndex = dayHeaderIndex + 1
-                // The first lesson for today will be after the spacer
-                val firstLessonIndex = spacerIndex + 1
-
-                val scrollIndex = when {
-                    currentLessonIndex >= 0 -> firstLessonIndex + currentLessonIndex
-                    nextLessonIndex >= 0 -> firstLessonIndex + nextLessonIndex
-                    todayLessons.isNotEmpty() -> firstLessonIndex
-                    else -> dayHeaderIndex
-                }
-                // Log mapping of today's lessons for debugging
-                todayLessons.forEachIndexed { idx, lesson ->
-                    val parsedStart = lesson.getParsedStartTime()
-                    val parsedEnd = lesson.getParsedEndTime()
-                    android.util.Log.d(
-                        "MainActivity",
-                        "Lesson idx=$idx name='${lesson.name}' parsedStart=$parsedStart parsedEnd=$parsedEnd rawStart='${lesson.startTime}' rawEnd='${lesson.endTime}'"
-                    )
-                }
-                // Scroll to the correct lesson (centered if possible)
-                val centerIndex = scrollIndex
-                android.util.Log.d("MainActivity", "Auto-scroll to: scrollIndex=$scrollIndex center=$centerIndex (todayIndex=$todaySectionIndex, lessons=${todayLessons.size}, currentIdx=$currentLessonIndex, nextIdx=$nextLessonIndex)")
-                // Wait until the list has rendered and has enough items to scroll to before calling scroll
-                while (listState.layoutInfo.totalItemsCount <= centerIndex) {
-                    delay(50)
-                }
-                listState.scrollToItem(centerIndex)
+            var absoluteIndex = 1 // list contains header at position 0
+            // Accumulate sizes for all days before 'todaySectionIndex'
+            for (i in 0 until todaySectionIndex) {
+                absoluteIndex += 1 // day header
+                absoluteIndex += 1 // spacing item
+                absoluteIndex += (timetable.days.getOrNull(i)?.lessons?.size ?: 0)
             }
+
+            // Now we're at the beginning of today's section
+            val dayHeaderIndex = absoluteIndex
+            val spacerIndex = dayHeaderIndex + 1
+            // The first lesson for today will be after the spacer
+            val firstLessonIndex = spacerIndex + 1
+
+            val scrollIndex = when {
+                currentLessonIndex >= 0 -> firstLessonIndex + currentLessonIndex
+                nextLessonIndex >= 0 -> firstLessonIndex + nextLessonIndex
+                todayLessons.isNotEmpty() -> firstLessonIndex
+                else -> dayHeaderIndex
+            }
+
+            // (reduced logging removed to improve performance)
+
+            // Scroll to the correct lesson (centered if possible)
+            val centerIndex = scrollIndex
+            // Wait until the list has rendered and has enough items to scroll to before calling scroll
+            while (listState.layoutInfo.totalItemsCount <= centerIndex) {
+                delay(50)
+            }
+            listState.scrollToItem(centerIndex)
         }
     }
     
@@ -654,16 +656,28 @@ fun ExamsPage(
     onRefresh: () -> Unit
 ) {
     val listState = rememberScalingLazyListState()
-    val now = java.time.LocalDateTime.now()
-    val relevantExams = examTimetable?.exams
-        ?.mapNotNull { ex ->
-            val start = ex.getStartDateTime() ?: return@mapNotNull null
-            val finishTime = ex.getParsedFinishTime() ?: return@mapNotNull null
-            val end = java.time.LocalDateTime.of(start.toLocalDate(), finishTime)
-            if (end.isAfter(now)) ex else null
+
+    // Low-frequency tick so we can recompute relevant exams periodically without doing it every recomposition
+    val minuteTick = remember { androidx.compose.runtime.mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(60_000L)
+            minuteTick.value = minuteTick.value + 1
         }
-        ?.sortedBy { it.getStartDateTime() ?: java.time.LocalDateTime.MAX }
-        ?: emptyList()
+    }
+
+    val relevantExams = remember(examTimetable, minuteTick.value) {
+        val now = java.time.LocalDateTime.now()
+        examTimetable?.exams
+            ?.mapNotNull { ex ->
+                val start = ex.getStartDateTime() ?: return@mapNotNull null
+                val finishTime = ex.getParsedFinishTime() ?: return@mapNotNull null
+                val end = java.time.LocalDateTime.of(start.toLocalDate(), finishTime)
+                if (end.isAfter(now)) ex else null
+            }
+            ?.sortedBy { it.getStartDateTime() ?: java.time.LocalDateTime.MAX }
+            ?: emptyList()
+    }
     
     var selectedExam by remember { androidx.compose.runtime.mutableStateOf<Exam?>(null) }
 

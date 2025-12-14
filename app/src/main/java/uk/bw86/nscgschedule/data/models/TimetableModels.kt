@@ -25,8 +25,7 @@ data class Lesson(
         fun fromJson(json: JSONObject): Lesson {
             val teachersArray = json.getJSONArray("teachers")
             val teachers = (0 until teachersArray.length()).map { teachersArray.getString(it) }
-            
-            return Lesson(
+            val lesson = Lesson(
                 teachers = teachers,
                 course = json.optString("course", ""),
                 group = json.optString("group", ""),
@@ -35,6 +34,12 @@ data class Lesson(
                 endTime = json.optString("endTime", ""),
                 room = json.optString("room", "")
             )
+
+            // Prime parsed caches so parsing happens once at model creation
+            lesson.getParsedStartTime()
+            lesson.getParsedEndTime()
+
+            return lesson
         }
     }
     
@@ -55,7 +60,7 @@ data class Lesson(
      * Handles formats like "9:30AM", "10:45AM", "1:45PM"
      */
     fun getParsedStartTime(): LocalTime? {
-        return parseTimeString(startTime)
+        return parsedStartCache
     }
     
     /**
@@ -63,7 +68,28 @@ data class Lesson(
      * Handles formats like "9:30AM", "10:45AM", "1:45PM"
      */
     fun getParsedEndTime(): LocalTime? {
-        return parseTimeString(endTime)
+        return parsedEndCache
+    }
+
+    // Cache epoch millis per date to avoid repeated LocalDate/Zone conversions during UI recomposition
+    private val epochCache: MutableMap<java.time.LocalDate, Pair<Long?, Long?>> = mutableMapOf()
+
+    fun getStartMillisForDate(date: java.time.LocalDate, zone: java.time.ZoneId): Long? {
+        val cached = epochCache[date]
+        if (cached != null) return cached.first
+        val s = getParsedStartTime() ?: return null
+        val millis = date.atTime(s).atZone(zone).toInstant().toEpochMilli()
+        epochCache[date] = Pair(millis, epochCache[date]?.second)
+        return millis
+    }
+
+    fun getEndMillisForDate(date: java.time.LocalDate, zone: java.time.ZoneId): Long? {
+        val cached = epochCache[date]
+        if (cached != null && cached.second != null) return cached.second
+        val e = getParsedEndTime() ?: return null
+        val millis = date.atTime(e).atZone(zone).toInstant().toEpochMilli()
+        epochCache[date] = Pair(epochCache[date]?.first, millis)
+        return millis
     }
     
     private fun parseTimeString(timeStr: String): LocalTime? {
@@ -87,12 +113,11 @@ data class Lesson(
             try {
                 val formatter = DateTimeFormatter.ofPattern(pattern, Locale.ENGLISH)
                 val parsed = LocalTime.parse(cleanTime.uppercase(Locale.ENGLISH), formatter)
-                Log.d("TimetableModels", "Parsed time '$timeStr' using pattern '$pattern' -> $parsed")
                 return parsed
             } catch (e: DateTimeParseException) {
                 // continue
             } catch (e: Exception) {
-                Log.d("TimetableModels", "Unexpected error parsing time '$timeStr' with pattern '$pattern': ${e.message}")
+                // ignore unexpected parse errors
             }
         }
 
@@ -103,19 +128,21 @@ data class Lesson(
                 try {
                     val formatter = DateTimeFormatter.ofPattern(pattern, Locale.ENGLISH)
                     val parsed = LocalTime.parse(withSpaceAmPm.uppercase(Locale.ENGLISH), formatter)
-                    Log.d("TimetableModels", "Parsed time '$timeStr' using pattern '$pattern' after inserting space -> $parsed")
                     return parsed
                 } catch (e: DateTimeParseException) {
                     // continue
                 } catch (e: Exception) {
-                    Log.d("TimetableModels", "Unexpected error parsing time '$timeStr' after inserting space with pattern '$pattern': ${e.message}")
+                    // ignore
                 }
             }
         }
 
-        Log.d("TimetableModels", "Couldn't parse time: raw='$timeStr' cleaned='$cleanTime'")
         return null
     }
+
+    // Cached parsed values to avoid repeated parsing during UI recomposition
+    private val parsedStartCache: LocalTime? by lazy { parseTimeString(startTime) }
+    private val parsedEndCache: LocalTime? by lazy { parseTimeString(endTime) }
 }
 
 /**

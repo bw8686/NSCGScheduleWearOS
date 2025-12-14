@@ -60,7 +60,7 @@ data class Exam(
 ) {
     companion object {
         fun fromJson(json: JSONObject): Exam {
-            return Exam(
+            val exam = Exam(
                 date = json.optString("date", ""),
                 boardCode = json.optString("boardCode", ""),
                 paper = json.optString("paper", ""),
@@ -72,6 +72,17 @@ data class Exam(
                 seatNumber = json.optString("seatNumber", ""),
                 additional = json.optString("additional", "")
             )
+
+            // Prime parsed caches so parsing happens once at model creation
+            exam.getParsedDate()
+            exam.getParsedStartTime()
+            exam.getParsedFinishTime()
+            // Also prime computed epoch values
+            exam.getStartDateTime()
+            exam.getStartMillisZone()
+            exam.getEndMillisZone()
+
+            return exam
         }
     }
     
@@ -94,48 +105,21 @@ data class Exam(
      * Parse the date string (format: "DD-MM-YYYY") to LocalDate
      */
     fun getParsedDate(): LocalDate? {
-        if (date.isBlank()) return null
-        val raw = date.trim()
-
-        // Support common formats:
-        // - DD-MM-YYYY (expected)
-        // - DD/MM/YYYY
-        // - YYYY-MM-DD
-        val parts = raw.split('-', '/').map { it.trim() }.filter { it.isNotEmpty() }
-        if (parts.size != 3) {
-            Log.d("ExamModels", "Couldn't parse exam date: raw='$raw'")
-            return null
-        }
-
-        return try {
-            val (a, b, c) = parts
-            val parsed = if (a.length == 4) {
-                // YYYY-MM-DD
-                LocalDate.of(a.toInt(), b.toInt(), c.toInt())
-            } else {
-                // DD-MM-YYYY
-                LocalDate.of(c.toInt(), b.toInt(), a.toInt())
-            }
-            Log.d("ExamModels", "Parsed exam date '$raw' -> $parsed")
-            parsed
-        } catch (e: Exception) {
-            Log.d("ExamModels", "Couldn't parse exam date: raw='$raw' err='${e.message}'")
-            null
-        }
+        return parsedDateCache
     }
     
     /**
      * Parse the start time string to LocalTime
      */
     fun getParsedStartTime(): LocalTime? {
-        return parseTimeString(startTime, label = "start")
+        return parsedStartTimeCache
     }
 
     /**
      * Parse the finish time string to LocalTime
      */
     fun getParsedFinishTime(): LocalTime? {
-        return parseTimeString(finishTime, label = "finish")
+        return parsedFinishTimeCache
     }
 
     private fun parseTimeString(timeStr: String, label: String): LocalTime? {
@@ -158,12 +142,11 @@ data class Exam(
             try {
                 val formatter = DateTimeFormatter.ofPattern(pattern, Locale.ENGLISH)
                 val parsed = LocalTime.parse(cleanTime.uppercase(Locale.ENGLISH), formatter)
-                Log.d("ExamModels", "Parsed exam $label time '$timeStr' using pattern '$pattern' -> $parsed")
                 return parsed
             } catch (_: DateTimeParseException) {
                 // continue
             } catch (e: Exception) {
-                Log.d("ExamModels", "Unexpected error parsing exam $label time '$timeStr' with '$pattern': ${e.message}")
+                // ignore
             }
         }
 
@@ -173,27 +156,75 @@ data class Exam(
                 try {
                     val formatter = DateTimeFormatter.ofPattern(pattern, Locale.ENGLISH)
                     val parsed = LocalTime.parse(withSpaceAmPm.uppercase(Locale.ENGLISH), formatter)
-                    Log.d("ExamModels", "Parsed exam $label time '$timeStr' using pattern '$pattern' after inserting space -> $parsed")
                     return parsed
                 } catch (_: DateTimeParseException) {
                     // continue
                 } catch (e: Exception) {
-                    Log.d("ExamModels", "Unexpected error parsing exam $label time '$timeStr' after inserting space with '$pattern': ${e.message}")
+                    // ignore
                 }
             }
         }
 
-        Log.d("ExamModels", "Couldn't parse exam $label time: raw='$timeStr' cleaned='$cleanTime'")
         return null
+    }
+
+    // Cached parsed values to avoid repeated parsing during UI recomposition
+    private val parsedDateCache: LocalDate? by lazy {
+        if (date.isBlank()) return@lazy null
+        val raw = date.trim()
+        val parts = raw.split('-', '/').map { it.trim() }.filter { it.isNotEmpty() }
+        if (parts.size != 3) return@lazy null
+
+        try {
+            val (a, b, c) = parts
+            if (a.length == 4) {
+                // YYYY-MM-DD
+                LocalDate.of(a.toInt(), b.toInt(), c.toInt())
+            } else {
+                // DD-MM-YYYY
+                LocalDate.of(c.toInt(), b.toInt(), a.toInt())
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private val parsedStartTimeCache: LocalTime? by lazy {
+        parseTimeString(startTime, label = "start")
+    }
+
+    private val parsedFinishTimeCache: LocalTime? by lazy {
+        parseTimeString(finishTime, label = "finish")
     }
     
     /**
      * Get the full date and time of the exam start
      */
     fun getStartDateTime(): LocalDateTime? {
-        val parsedDate = getParsedDate() ?: return null
-        val parsedTime = getParsedStartTime() ?: return null
-        return LocalDateTime.of(parsedDate, parsedTime)
+        val pd = getParsedDate() ?: return null
+        val pt = getParsedStartTime() ?: return null
+        return LocalDateTime.of(pd, pt)
+    }
+
+    // Cached epoch millis for the exam start/end to avoid recomputing during UI renders
+    private val startEpochCache: Long? by lazy {
+        val dt = getStartDateTime() ?: return@lazy null
+        dt.atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+    }
+
+    private val endEpochCache: Long? by lazy {
+        val pd = getParsedDate() ?: return@lazy null
+        val ft = getParsedFinishTime() ?: return@lazy null
+        LocalDateTime.of(pd, ft).atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+    }
+
+    fun getStartMillisZone(zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): Long? {
+        // If caller uses system default zone, we can return cached value
+        return if (zone == java.time.ZoneId.systemDefault()) startEpochCache else getStartDateTime()?.atZone(zone)?.toInstant()?.toEpochMilli()
+    }
+
+    fun getEndMillisZone(zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): Long? {
+        return if (zone == java.time.ZoneId.systemDefault()) endEpochCache else getParsedDate()?.let { d -> getParsedFinishTime()?.let { ft -> LocalDateTime.of(d, ft).atZone(zone).toInstant().toEpochMilli() } }
     }
     
     /**
