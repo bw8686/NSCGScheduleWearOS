@@ -7,6 +7,7 @@ package uk.bw86.nscgschedule.presentation
 
 import android.content.Intent
 import android.os.Bundle
+import androidx.compose.runtime.LaunchedEffect
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -437,7 +438,14 @@ fun TimetablePage(
 ) {
     val listState = rememberScalingLazyListState()
     val nowDate = java.time.LocalDate.now()
-    val nowTime = java.time.LocalTime.now()
+    // Minute tick to force recomposition so time-based logic updates promptly
+    val minuteTick = remember { androidx.compose.runtime.mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(30_000L)
+            minuteTick.value = minuteTick.value + 1
+        }
+    }
     val todayIndex = nowDate.dayOfWeek.value - 1  // 0-6 for Mon-Sun
     
     var selectedLesson by remember { androidx.compose.runtime.mutableStateOf<Lesson?>(null) }
@@ -460,7 +468,8 @@ fun TimetablePage(
     }
 
     // Memoize current/next lesson indices — depend on current time and today's lessons
-    val currentLessonIndex = remember(nowTime, todayLessons) {
+    val currentLessonIndex = remember(minuteTick.value, todayLessons) {
+        val nowTime = java.time.LocalTime.now()
         todayLessons.indexOfFirst { lesson ->
             val start = lesson.getParsedStartTime()
             val end = lesson.getParsedEndTime()
@@ -468,7 +477,8 @@ fun TimetablePage(
         }
     }
 
-    val nextLessonIndex = remember(nowTime, todayLessons) {
+    val nextLessonIndex = remember(minuteTick.value, todayLessons) {
+        val nowTime = java.time.LocalTime.now()
         todayLessons.indexOfFirst { lesson ->
             val start = lesson.getParsedStartTime()
             start != null && start.isAfter(nowTime)
@@ -604,7 +614,8 @@ fun TimetablePage(
                         lesson = lesson,
                         showToday = isToday,
                         activeExamEvent = if (isToday) activeExamEvent else null,
-                        onClick = { selectedLesson = lesson }
+                        onClick = { selectedLesson = lesson },
+                        timeTick = minuteTick.value
                     )
                 }
             }
@@ -661,7 +672,7 @@ fun ExamsPage(
     val minuteTick = remember { androidx.compose.runtime.mutableStateOf(0) }
     LaunchedEffect(Unit) {
         while (true) {
-            delay(60_000L)
+            delay(30_000L)
             minuteTick.value = minuteTick.value + 1
         }
     }
@@ -806,8 +817,12 @@ fun LessonCard(
     lesson: Lesson,
     showToday: Boolean = false,
     activeExamEvent: ScheduleMerger.Event? = null,
-    onClick: () -> Unit = {}
+    onClick: () -> Unit = {},
+    timeTick: Int = 0
 ) {
+    // `timeTick` is used to force recomposition each minute from the parent.
+    // Read into a local val so the parameter is referenced and doesn't warn as unused.
+    val _tickRef = timeTick
     val now = LocalTime.now()
     val startTime = lesson.getParsedStartTime()
     val endTime = lesson.getParsedEndTime()
@@ -834,6 +849,9 @@ fun LessonCard(
     val minutesUntil = if (isUpcoming && startTime != null) {
         ChronoUnit.MINUTES.between(now, startTime)
     } else null
+
+    // Consider "imminent" lessons (starting within 30 minutes) as highlighted like active lessons
+    val isImminent = isUpcoming && minutesUntil != null && minutesUntil < 30
     
     // Use Material ColorScheme
     val cardColor = when {
@@ -841,9 +859,9 @@ fun LessonCard(
         isUpcoming && minutesUntil != null && minutesUntil < 30 -> MaterialTheme.colorScheme.primaryContainer
         else -> MaterialTheme.colorScheme.surfaceContainer
     }
-    val labelColor = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.secondary
-    val textColor = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-    val secondaryTextColor = if (isActive) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.95f) else MaterialTheme.colorScheme.onSurfaceVariant
+    val labelColor = if (isActive || isImminent) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.secondary
+    val textColor = if (isActive || isImminent) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+    val secondaryTextColor = if (isActive || isImminent) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.95f) else MaterialTheme.colorScheme.onSurfaceVariant
     
     Card(
         onClick = onClick,
@@ -896,7 +914,7 @@ fun LessonCard(
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = "in ${minutesUntil}m",
-                    color = MaterialTheme.colorScheme.primary,
+                    color = labelColor,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold
                 )

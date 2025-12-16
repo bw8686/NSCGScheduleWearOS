@@ -15,7 +15,10 @@ import androidx.wear.watchface.complications.data.ShortTextComplicationData
 import androidx.wear.watchface.complications.data.TimeRange
 import androidx.wear.watchface.complications.datasource.ComplicationDataSourceUpdateRequester
 import androidx.wear.watchface.complications.datasource.ComplicationRequest
-import androidx.wear.watchface.complications.datasource.SuspendingComplicationDataSourceService
+import androidx.wear.watchface.complications.datasource.SuspendingTimelineComplicationDataSourceService
+import androidx.wear.watchface.complications.datasource.ComplicationDataTimeline
+import androidx.wear.watchface.complications.datasource.TimelineEntry
+import androidx.wear.watchface.complications.datasource.TimeInterval
 import uk.bw86.nscgschedule.data.DataRepository
 import uk.bw86.nscgschedule.data.models.Lesson
 import uk.bw86.nscgschedule.presentation.MainActivity
@@ -27,7 +30,7 @@ import java.time.LocalTime
  * Complication showing the next lesson or exam
  * Supports SHORT_TEXT and LONG_TEXT complication types
  */
-class MainComplicationService : SuspendingComplicationDataSourceService() {
+class MainComplicationService : SuspendingTimelineComplicationDataSourceService() {
     
     companion object {
         private const val TAG = "MainComplicationService"
@@ -70,7 +73,7 @@ class MainComplicationService : SuspendingComplicationDataSourceService() {
         }
     }
 
-    override suspend fun onComplicationRequest(request: ComplicationRequest): ComplicationData? {
+    override suspend fun onComplicationRequest(request: ComplicationRequest): ComplicationDataTimeline? {
         Log.d(TAG, "Complication request received for type: ${request.complicationType}")
 
         val timetable = repository.getCurrentTimetable()
@@ -91,18 +94,99 @@ class MainComplicationService : SuspendingComplicationDataSourceService() {
         val pick = ScheduleMerger.pick(events, nowMillis)
         val display = pick.current ?: pick.next
 
-        // Mark data as stale after the displayed item's end, so the system refreshes near boundaries.
-        val validUntilMillis = display?.endMillis
-
         Log.d(
             TAG,
             "Complication pick: display=${display?.kind} active=${display?.isActiveAt(nowMillis) == true} next=${pick.next?.kind} events=${events.size}"
         )
 
-        return when (display?.kind) {
-            ScheduleMerger.Kind.EXAM -> createExamComplication(request.complicationType, display.exam!!, validUntilMillis)
-            ScheduleMerger.Kind.LESSON -> createLessonComplication(request.complicationType, display.lesson!!, validUntilMillis)
-            null -> createNoDataComplication(request.complicationType, validUntilMillis)
+        // Build a default complication data. Prefer the next LESSON for today if present,
+        // otherwise fall back to the generic "NSCG" default.
+        val todayStartMillis = java.time.LocalDate.now().atStartOfDay(zone).toInstant().toEpochMilli()
+        val todayEndMillis = java.time.LocalDate.now().plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+
+        val nextLessonTodayEvent = events
+            .filter { it.kind == ScheduleMerger.Kind.LESSON }
+            .filter { it.startMillis >= nowMillis && it.startMillis < todayEndMillis }
+            .minByOrNull { it.startMillis }
+
+        val defaultComplication = when {
+            nextLessonTodayEvent != null -> when (request.complicationType) {
+                ComplicationType.SHORT_TEXT -> createShortTextData(
+                    text = nextLessonTodayEvent.lesson?.room ?: "",
+                    contentDescription = "Next lesson: ${nextLessonTodayEvent.lesson?.name} at ${nextLessonTodayEvent.lesson?.startTime} in ${nextLessonTodayEvent.lesson?.room}",
+                    validUntilMillis = null
+                )
+                ComplicationType.LONG_TEXT -> createLongTextData(
+                    title = nextLessonTodayEvent.lesson?.room ?: "",
+                    text = nextLessonTodayEvent.lesson?.startTime ?: "",
+                    contentDescription = "Next lesson: ${nextLessonTodayEvent.lesson?.name} at ${nextLessonTodayEvent.lesson?.startTime} in ${nextLessonTodayEvent.lesson?.room}",
+                    validUntilMillis = null
+                )
+                else -> null
+            }
+            else -> when (request.complicationType) {
+                ComplicationType.SHORT_TEXT -> createShortTextData(
+                    text = "NSCG",
+                    contentDescription = "NSCGSchedule - No upcoming events",
+                    validUntilMillis = null
+                )
+                ComplicationType.LONG_TEXT -> createLongTextData(
+                    title = "NSCGSchedule",
+                    text = "No upcoming events",
+                    contentDescription = "No upcoming lessons or exams",
+                    validUntilMillis = null
+                )
+                else -> null
+            }
+        }
+
+        // Build timeline entries: one entry per event covering [start, end).
+        val timelineEntries = mutableListOf<TimelineEntry>()
+        events.sortedBy { it.startMillis }.forEach { ev ->
+            val cd: ComplicationData? = when (ev.kind) {
+                ScheduleMerger.Kind.EXAM -> when (request.complicationType) {
+                    ComplicationType.SHORT_TEXT -> createShortTextData(
+                        text = getShortRoom(ev.exam?.examRoom ?: ""),
+                        contentDescription = "Next exam: ${ev.exam?.subjectDescription} at ${ev.exam?.startTime} in ${ev.exam?.examRoom}",
+                        validUntilMillis = null
+                    )
+                    ComplicationType.LONG_TEXT -> createLongTextData(
+                        title = "EXAM - ${getShortRoom(ev.exam?.examRoom ?: "")}",
+                        text = "${ev.exam?.startTime}",
+                        contentDescription = "Next exam: ${ev.exam?.subjectDescription} at ${ev.exam?.startTime} in ${ev.exam?.examRoom}",
+                        validUntilMillis = null
+                    )
+                    else -> null
+                }
+                ScheduleMerger.Kind.LESSON -> when (request.complicationType) {
+                    ComplicationType.SHORT_TEXT -> createShortTextData(
+                        text = "${ev.lesson?.room}",
+                        contentDescription = "Next lesson: ${ev.lesson?.name} at ${ev.lesson?.startTime} in ${ev.lesson?.room}",
+                        validUntilMillis = null
+                    )
+                    ComplicationType.LONG_TEXT -> createLongTextData(
+                        title = ev.lesson?.room ?: "",
+                        text = ev.lesson?.startTime ?: "",
+                        contentDescription = "Next lesson: ${ev.lesson?.name} at ${ev.lesson?.startTime} in ${ev.lesson?.room}",
+                        validUntilMillis = null
+                    )
+                    else -> null
+                }
+                else -> null
+            }
+
+            if (cd != null) {
+                val start = Instant.ofEpochMilli(ev.startMillis)
+                val end = Instant.ofEpochMilli(ev.endMillis)
+                val interval = TimeInterval(start, end)
+                timelineEntries.add(TimelineEntry(interval, cd))
+            }
+        }
+
+        return if (defaultComplication != null) {
+            ComplicationDataTimeline(defaultComplication, timelineEntries)
+        } else {
+            null
         }
     }
 
@@ -162,11 +246,11 @@ class MainComplicationService : SuspendingComplicationDataSourceService() {
         return when (type) {
             ComplicationType.SHORT_TEXT -> createShortTextData(
                 text = "NSCG",
-                contentDescription = "NSCG Schedule - No upcoming events",
+                contentDescription = "NSCGSchedule - No upcoming events",
                 validUntilMillis = validUntilMillis
             )
             ComplicationType.LONG_TEXT -> createLongTextData(
-                title = "NSCG Schedule",
+                title = "NSCGSchedule",
                 text = "No upcoming events",
                 contentDescription = "No upcoming lessons or exams",
                 validUntilMillis = validUntilMillis

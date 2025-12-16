@@ -77,6 +77,8 @@ import java.time.LocalDate
 import java.time.LocalTime
 
 import java.time.format.DateTimeFormatter
+import java.time.format.TextStyle
+import java.util.Locale
 
 import java.time.temporal.ChronoUnit
 
@@ -202,6 +204,8 @@ private fun tile(
     } else {
         val dayStartMillis = today.atStartOfDay(zone).toInstant().toEpochMilli()
         val dayEndMillis = today.plusDays(2).atStartOfDay(zone).toInstant().toEpochMilli() // cover today + tomorrow
+        // A strict end boundary for "today" only (used for checking "no lessons today")
+        val todayOnlyEndMillis = today.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
 
         val events = ScheduleMerger.buildEvents(
             timetable = timetable,
@@ -211,13 +215,27 @@ private fun tile(
             horizonDays = 14
         )
 
-        val segments = ScheduleMerger.buildDisplaySegments(
-            events = events,
-            windowStartMillis = dayStartMillis,
-            windowEndMillis = dayEndMillis
-        )
+        // Debug: log event list and day boundaries to diagnose "No lessons today!" always showing
+        try {
+            Log.d(TAG, "Events total=${events.size}")
+            val dayStartReadable = java.time.Instant.ofEpochMilli(dayStartMillis).atZone(zone)
+            val todayOnlyEndReadable = java.time.Instant.ofEpochMilli(todayOnlyEndMillis).atZone(zone)
+            Log.d(TAG, "Day bounds: start=$dayStartReadable endExclusive=$todayOnlyEndReadable now=${java.time.Instant.ofEpochMilli(nowMillis).atZone(zone)}")
+            events.sortedBy { it.startMillis }.forEachIndexed { idx, ev ->
+                val start = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone)
+                val end = java.time.Instant.ofEpochMilli(ev.endMillis).atZone(zone)
+                Log.d(TAG, "Event[$idx]: kind=${ev.kind} start=$start end=$end lesson=${ev.lesson?.name ?: "-"} exam=${ev.exam?.subjectDescription ?: "-"}")
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Failed to log events: ${e.message}")
+        }
 
-        if (segments.isEmpty()) {
+        // Build explicit timeline entries per-event so we have deterministic
+        // coverage at both the start and end of each lesson/exam. For each
+        // event add an entry valid for [startMillis, endMillis) and, if there
+        // is a gap to the next event, an entry covering that gap to display
+        // a "done/next" state until the next event.
+        if (events.isEmpty()) {
             timelineBuilder.addTimelineEntry(
                 TimelineBuilders.TimelineEntry.Builder()
                     .setLayout(LayoutElementBuilders.Layout.Builder().setRoot(noDataMaterialLayout(requestParams, context)).build())
@@ -239,25 +257,145 @@ private fun tile(
                 }
             }
 
-            val hasAnyEvents = events.isNotEmpty()
-            segments.forEach { seg ->
-                val root = if (seg.display != null) {
-                    scheduleMaterialLayout(
-                        context = context,
-                        deviceParameters = requestParams.deviceConfiguration!!,
-                        currentItem = toScheduleItem(seg.display),
-                        nextItem = seg.next?.let { toScheduleItem(it) },
-                        isCurrentActive = seg.isDisplayActive
-                    )
-                } else {
-                    // If we had schedule data but no more events in the window, show a friendly "done" state.
-                    if (hasAnyEvents) {
-                        scheduleMaterialLayout(
-                            context = context,
-                            deviceParameters = requestParams.deviceConfiguration!!,
-                            currentItem = ScheduleItem.LessonItem(
+            val sorted = events.sortedBy { it.startMillis }
+
+            // If the first event is in the future, add a pre-gap entry that
+            // covers 'now' up until that first event start. This ensures the
+            // Tile has at least one timeline entry valid for the current time
+            // (avoids the system warning about "Out of valid timelines").
+            val firstEv = sorted.first()
+            if (firstEv.startMillis > nowMillis) {
+                val todayDate = java.time.Instant.ofEpochMilli(nowMillis).atZone(zone).toLocalDate()
+                val lessonsToday = events.filter { it.kind == ScheduleMerger.Kind.LESSON && it.lesson != null }
+                    .filter { java.time.Instant.ofEpochMilli(it.startMillis).atZone(zone).toLocalDate() == todayDate }
+
+                // Debug: list which events were considered "today"
+                try {
+                    Log.d(TAG, "lessonsToday filtered count=${lessonsToday.size}")
+                    lessonsToday.forEachIndexed { idx, ev ->
+                        val startLocal = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone).toLocalDate()
+                        val startZ = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone)
+                        Log.d(TAG, "lessonsToday[$idx]: kind=${ev.kind} startLocal=$startLocal startZ=$startZ startMillis=${ev.startMillis} name=${ev.lesson?.name ?: "-"}")
+                    }
+                } catch (e: Exception) {
+                    Log.d(TAG, "Failed to log lessonsToday: ${e.message}")
+                }
+
+                Log.d(TAG, "lessonsToday count=${lessonsToday.size} (pre-gap) todayStart=$dayStartMillis todayEnd=$todayOnlyEndMillis now=$nowMillis nextEvStart=${firstEv.startMillis}")
+
+                val scheduledTodayInfo = countScheduledLessonsAndMaxEndMillis(timetable, todayDate, zone)
+                Log.d(TAG, "scheduledToday count=${scheduledTodayInfo.first} maxEnd=${scheduledTodayInfo.second}")
+
+                val message = when {
+                    scheduledTodayInfo.first == 0 -> "No lessons today!"
+                    scheduledTodayInfo.second != null && nowMillis > scheduledTodayInfo.second!! -> "Done for today!"
+                    else -> "You're done for now"
+                }
+
+                val currentPlaceholder = ScheduleItem.LessonItem(
+                    Lesson(
+                        name = message,
+                        startTime = "",
+                        endTime = "",
+                        room = "",
+                        teachers = emptyList(),
+                        course = "",
+                        group = ""
+                    ),
+                    openStartMillis = null,
+                    openEndMillis = null
+                )
+
+
+                // When there are no lessons today we still want to show the next
+                // lesson (on a future day). Show the next card and label it with
+                // the day of the next event.
+                val showNextCard = true
+                val nextDay = java.time.Instant.ofEpochMilli(firstEv.startMillis)
+                    .atZone(zone)
+                    .dayOfWeek
+                    .getDisplayName(TextStyle.FULL, Locale.getDefault())
+                val nextLabelText = if (firstEv.kind == ScheduleMerger.Kind.LESSON) "Next lesson: $nextDay" else "Next: $nextDay"
+
+                val preGapRoot = scheduleMaterialLayout(
+                    context = context,
+                    deviceParameters = requestParams.deviceConfiguration!!,
+                    currentItem = currentPlaceholder,
+                    nextItem = if (showNextCard) toScheduleItem(firstEv) else null,
+                    isCurrentActive = false,
+                    nextLabel = if (showNextCard) nextLabelText else null
+                )
+
+                val preGapLayout = LayoutElementBuilders.Layout.Builder().setRoot(preGapRoot).build()
+                val preGapEntry = TimelineBuilders.TimelineEntry.Builder().setLayout(preGapLayout)
+                preGapEntry.setValidity(
+                    TimelineBuilders.TimeInterval.Builder()
+                        .setStartMillis(nowMillis)
+                        .setEndMillis(firstEv.startMillis)
+                        .build()
+                )
+                timelineBuilder.addTimelineEntry(preGapEntry.build())
+            }
+
+            for (i in sorted.indices) {
+                val ev = sorted[i]
+                val nextEv = sorted.getOrNull(i + 1)
+
+                // Entry for the event duration
+                val eventRoot = scheduleMaterialLayout(
+                    context = context,
+                    deviceParameters = requestParams.deviceConfiguration!!,
+                    currentItem = toScheduleItem(ev),
+                    nextItem = nextEv?.let { toScheduleItem(it) },
+                    isCurrentActive = nowMillis in ev.startMillis until ev.endMillis
+                )
+
+                val eventLayout = LayoutElementBuilders.Layout.Builder().setRoot(eventRoot).build()
+                val eventEntry = TimelineBuilders.TimelineEntry.Builder().setLayout(eventLayout)
+                eventEntry.setValidity(
+                    TimelineBuilders.TimeInterval.Builder()
+                        .setStartMillis(ev.startMillis)
+                        .setEndMillis(ev.endMillis)
+                        .build()
+                )
+                timelineBuilder.addTimelineEntry(eventEntry.build())
+
+                // Entry for gap after event until next start (or day end)
+                val gapStart = ev.endMillis
+                val gapEnd = nextEv?.startMillis ?: dayEndMillis
+                if (gapStart < gapEnd) {
+                    val gapRoot = if (nextEv != null) {
+                            // Build a dynamic placeholder message depending on lessons for today
+                            val todayDate = java.time.Instant.ofEpochMilli(nowMillis).atZone(zone).toLocalDate()
+                            val lessonsToday = events.filter { it.kind == ScheduleMerger.Kind.LESSON && it.lesson != null }
+                                .filter { java.time.Instant.ofEpochMilli(it.startMillis).atZone(zone).toLocalDate() == todayDate }
+
+                            // Debug: list which events were considered "today" for this gap
+                            try {
+                                Log.d(TAG, "lessonsToday filtered count=${lessonsToday.size} (gap)")
+                                lessonsToday.forEachIndexed { idx, ev ->
+                                    val startLocal = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone).toLocalDate()
+                                    val startZ = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone)
+                                    Log.d(TAG, "lessonsToday(gap)[$idx]: kind=${ev.kind} startLocal=$startLocal startZ=$startZ startMillis=${ev.startMillis} name=${ev.lesson?.name ?: "-"}")
+                                }
+                            } catch (e: Exception) {
+                                Log.d(TAG, "Failed to log lessonsToday (gap): ${e.message}")
+                            }
+
+                            Log.d(TAG, "lessonsToday count=${lessonsToday.size} todayStart=$dayStartMillis todayEnd=$todayOnlyEndMillis now=$nowMillis nextEvStart=${nextEv.startMillis}")
+
+                            val scheduledTodayInfo = countScheduledLessonsAndMaxEndMillis(timetable, todayDate, zone)
+                            Log.d(TAG, "scheduledToday count=${scheduledTodayInfo.first} maxEnd=${scheduledTodayInfo.second} (gap)")
+
+                            val message = when {
+                                scheduledTodayInfo.first == 0 -> "No lessons today!"
+                                scheduledTodayInfo.second != null && nowMillis > scheduledTodayInfo.second!! -> "Done for today!"
+                                else -> "You're done for now"
+                            }
+
+                            val currentPlaceholder = ScheduleItem.LessonItem(
                                 Lesson(
-                                    name = "You're done for today!",
+                                    name = message,
                                     startTime = "",
                                     endTime = "",
                                     room = "",
@@ -267,24 +405,39 @@ private fun tile(
                                 ),
                                 openStartMillis = null,
                                 openEndMillis = null
-                            ),
-                            nextItem = null,
-                            isCurrentActive = false
-                        )
-                    } else {
-                        noDataMaterialLayout(requestParams, context)
-                    }
-                }
+                            )
 
-                val layout = LayoutElementBuilders.Layout.Builder().setRoot(root).build()
-                val entryBuilder = TimelineBuilders.TimelineEntry.Builder().setLayout(layout)
-                entryBuilder.setValidity(
-                    TimelineBuilders.TimeInterval.Builder()
-                        .setStartMillis(seg.startMillis)
-                        .setEndMillis(seg.endMillis)
-                        .build()
-                )
-                timelineBuilder.addTimelineEntry(entryBuilder.build())
+                            // Show the next day's event even when there are no lessons
+                            // today, and label it with the weekday name.
+                            val showNextCard = true
+                            val nextDay = java.time.Instant.ofEpochMilli(nextEv.startMillis)
+                                .atZone(zone)
+                                .dayOfWeek
+                                .getDisplayName(TextStyle.FULL, Locale.getDefault())
+                            val nextLabelText = if (nextEv.kind == ScheduleMerger.Kind.LESSON) "Next lesson: $nextDay" else "Next: $nextDay"
+
+                            scheduleMaterialLayout(
+                                context = context,
+                                deviceParameters = requestParams.deviceConfiguration!!,
+                                currentItem = currentPlaceholder,
+                                nextItem = if (showNextCard) toScheduleItem(nextEv) else null,
+                                isCurrentActive = false,
+                                nextLabel = if (showNextCard) nextLabelText else null
+                            )
+                        } else {
+                            noDataMaterialLayout(requestParams, context)
+                        }
+
+                    val gapLayout = LayoutElementBuilders.Layout.Builder().setRoot(gapRoot).build()
+                    val gapEntry = TimelineBuilders.TimelineEntry.Builder().setLayout(gapLayout)
+                    gapEntry.setValidity(
+                        TimelineBuilders.TimeInterval.Builder()
+                            .setStartMillis(gapStart)
+                            .setEndMillis(gapEnd)
+                            .build()
+                    )
+                    timelineBuilder.addTimelineEntry(gapEntry.build())
+                }
             }
         }
     }
@@ -300,9 +453,9 @@ private fun scheduleMaterialLayout(
     context: Context,
     deviceParameters: androidx.wear.protolayout.DeviceParametersBuilders.DeviceParameters,
     currentItem: ScheduleItem,
-    nextItem: ScheduleItem?
-    ,
-    isCurrentActive: Boolean
+    nextItem: ScheduleItem?,
+    isCurrentActive: Boolean,
+    nextLabel: String? = null
 ): LayoutElementBuilders.LayoutElement = materialScope(context, deviceParameters) {
     // Instead of a single card, show a column of cards for all valid schedule items for this timeline entry
     // (for timeline, this will be just the current/next item, but this structure allows for easy expansion)
@@ -316,33 +469,100 @@ private fun scheduleMaterialLayout(
                 .setWidth(expand())
                 .setHeight(wrap())
                 .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
-                .addContent(
-                    buildScheduleItemCard(currentItem, isActive = isCurrentActive, scope = this, context = context, isLarge = isLargeScreen(deviceParameters))
-                )
-                .addContent(Spacer.Builder().setHeight(dp(4f)).build())
-                // Always attempt to show a second card. If nextItem is null, show a 'You're done' placeholder.
-                .addContent(
-                    if (nextItem != null) {
-                        buildScheduleItemCard(nextItem, isActive = false, scope = this, context = context, isLarge = isLargeScreen(deviceParameters))
+                .apply {
+                    // Detect placeholder currentItem (blank times & room)
+                    val isPlaceholder = when (currentItem) {
+                        is ScheduleItem.LessonItem ->
+                            currentItem.lesson.startTime.isBlank() &&
+                                    currentItem.lesson.endTime.isBlank() &&
+                                    currentItem.lesson.room.isBlank()
+                        else -> false
+                    }
+
+                    if (isPlaceholder && nextItem != null && nextLabel != null) {
+                        // Render a single card that contains the placeholder message
+                        // and the small "Next lesson: <Day>" label together.
+                        addContent(
+                            buildPlaceholderCardWithLabel(
+                                placeholder = currentItem as ScheduleItem.LessonItem,
+                                label = nextLabel,
+                                scope = this@materialScope,
+                                context = context,
+                                isLarge = isLargeScreen(deviceParameters),
+                                onClick = createOpenAppClickable(context)
+                            )
+                        )
                     } else {
-                        buildLessonCard(
-                            Lesson(
-                                name = "You're done for today!",
-                                startTime = "",
-                                endTime = "",
-                                room = "",
-                                teachers = emptyList(),
-                                course = "",
-                                group = ""
-                            ),
-                            isActive = false,
-                            scope = this,
-                            context = context,
-                            isLarge = isLargeScreen(deviceParameters),
-                            onClick = createOpenAppClickable(context)
+                        addContent(
+                            buildScheduleItemCard(currentItem, isActive = isCurrentActive, scope = this@materialScope, context = context, isLarge = isLargeScreen(deviceParameters))
                         )
                     }
-                )
+                }
+                .addContent(Spacer.Builder().setHeight(dp(4f)).build())
+                // Always attempt to show a second card. If nextItem is null, show a 'You're done' placeholder.
+                    .apply {
+                    if (nextItem != null) {
+                        // If we already embedded the label in the placeholder card,
+                        // don't add the label here again. Otherwise show it above
+                        // the next card.
+                        val currentIsPlaceholder = when (currentItem) {
+                            is ScheduleItem.LessonItem ->
+                                currentItem.lesson.startTime.isBlank() &&
+                                        currentItem.lesson.endTime.isBlank() &&
+                                        currentItem.lesson.room.isBlank()
+                            else -> false
+                        }
+
+                        if (!(currentIsPlaceholder && nextLabel != null)) {
+                            if (nextLabel != null) {
+                                addContent(
+                                    text(
+                                        text = nextLabel.layoutString,
+                                        typography = Typography.LABEL_SMALL
+                                    )
+                                )
+                            }
+                        }
+
+                        addContent(
+                            buildScheduleItemCard(nextItem, isActive = false, scope = this@materialScope, context = context, isLarge = isLargeScreen(deviceParameters))
+                        )
+                    } else {
+                        // If the currentItem is already a placeholder (created with
+                        // empty start/end times and room), don't render an extra
+                        // fallback 'You're done for today' card — that would show
+                        // two messages. Only render the fallback when the
+                        // currentItem is a real schedule item.
+                        val isPlaceholder = when (currentItem) {
+                            is ScheduleItem.LessonItem ->
+                                currentItem.lesson.startTime.isBlank() &&
+                                        currentItem.lesson.endTime.isBlank() &&
+                                        currentItem.lesson.room.isBlank()
+                            else -> false
+                        }
+
+                        if (!isPlaceholder) {
+                            addContent(
+                                buildLessonCard(
+                                    Lesson(
+                                        name = "You're done for today!",
+                                        startTime = "",
+                                        endTime = "",
+                                        room = "",
+                                        teachers = emptyList(),
+                                        course = "",
+                                        group = ""
+                                    ),
+                                    isActive = false,
+                                    scope = this@materialScope,
+                                    context = context,
+                                    isLarge = isLargeScreen(deviceParameters),
+                                    onClick = createOpenAppClickable(context)
+                                )
+                            )
+                        }
+                    }
+                }
                 .build()
         },
         bottomSlot = {
@@ -520,27 +740,31 @@ private fun buildLessonCard(
                     )
                 )
                 .addContent(Spacer.Builder().setHeight(dp(4f)).build())
-                // Centered time and room
-                .addContent(
-                    Row.Builder()
-                        .setWidth(DimensionBuilders.expand())
-                        .addContent(
-                            text(
-                                text = timeText.layoutString,
-                                typography = Typography.LABEL_SMALL,
-                                alignment = TEXT_ALIGN_CENTER
-                            )
+                // Centered time and room (only shown when lesson times are present)
+                .apply {
+                    if (lesson.startTime.isNotBlank() || lesson.endTime.isNotBlank() || lesson.room.isNotBlank()) {
+                        addContent(
+                            Row.Builder()
+                                .setWidth(DimensionBuilders.expand())
+                                .addContent(
+                                    text(
+                                        text = timeText.layoutString,
+                                        typography = Typography.LABEL_SMALL,
+                                        alignment = TEXT_ALIGN_CENTER
+                                    )
+                                )
+                                .addContent(Spacer.Builder().setWidth(dp(8f)).build())
+                                .addContent(
+                                    text(
+                                        text = lesson.room.layoutString,
+                                        typography = Typography.LABEL_SMALL,
+                                        alignment = TEXT_ALIGN_CENTER
+                                    )
+                                )
+                                .build()
                         )
-                        .addContent(Spacer.Builder().setWidth(dp(8f)).build())
-                        .addContent(
-                            text(
-                                text = lesson.room.layoutString,
-                                typography = Typography.LABEL_SMALL,
-                                alignment = TEXT_ALIGN_CENTER
-                            )
-                        )
-                        .build()
-                )
+                    }
+                }
                 .build()
         }
     )
@@ -695,6 +919,72 @@ private fun mergeSchedule(
 
         })
 
+}
+
+
+// Count scheduled lessons on a given LocalDate (based on `timetable` contents).
+// Returns Pair(count, maxEndMillisOrNull).
+private fun countScheduledLessonsAndMaxEndMillis(
+    timetable: uk.bw86.nscgschedule.data.models.Timetable?,
+    date: java.time.LocalDate,
+    zone: java.time.ZoneId
+): Pair<Int, Long?> {
+    if (timetable == null) return Pair(0, null)
+
+    var count = 0
+    var maxEnd: Long? = null
+
+    val patterns = listOf("d/M/uuuu", "dd/MM/uuuu", "d/MM/uuuu", "dd/M/uuuu")
+
+    timetable.days.forEach { daySchedule ->
+        val raw = daySchedule.day.trim()
+        if (raw.isBlank()) return@forEach
+
+        val parts = raw.split(' ').filter { it.isNotBlank() }
+        val datePart = parts.lastOrNull() ?: return@forEach
+
+        var parsedDate: java.time.LocalDate? = null
+        for (pattern in patterns) {
+            try {
+                val formatter = java.time.format.DateTimeFormatter.ofPattern(pattern, Locale.ENGLISH)
+                parsedDate = java.time.LocalDate.parse(datePart, formatter)
+                break
+            } catch (_: Exception) {
+            }
+        }
+
+        val matches = if (parsedDate != null) {
+            parsedDate == date
+        } else {
+            // If the day string doesn't include an explicit date, match by weekday name
+            val rawLower = raw.lowercase(Locale.ENGLISH)
+            val dowNameFull = date.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.ENGLISH).lowercase(Locale.ENGLISH)
+            val dowNameShort = date.dayOfWeek.name.lowercase(Locale.ENGLISH)
+            rawLower.contains(dowNameFull) || rawLower.contains(dowNameShort)
+        }
+
+        if (!matches) return@forEach
+
+        // Count lessons and compute max end millis
+        daySchedule.lessons.forEach { lesson ->
+            val s = try { lesson.getParsedStartTime() } catch (_: Exception) { null }
+            val e = try { lesson.getParsedEndTime() } catch (_: Exception) { null }
+            if (s == null || e == null) return@forEach
+            if (!e.isAfter(s)) return@forEach
+
+            val endMillis = java.time.LocalDateTime.of(date, e).atZone(zone).toInstant().toEpochMilli()
+            count += 1
+            if (maxEnd == null) {
+                maxEnd = endMillis
+            } else {
+                if (endMillis > maxEnd!!) {
+                    maxEnd = endMillis
+                }
+            }
+        }
+    }
+
+    return Pair(count, maxEnd)
 }
 
 
@@ -981,6 +1271,50 @@ private fun buildScheduleItemCard(
      // Delegate to responsive overload with default isLarge=false
      buildLessonCard(lesson, isActive, scope, context, /*isLarge=*/false, onClick = createOpenAppClickable(context))
  }
+
+
+// Build a placeholder card that includes a small label (e.g., "Next lesson: Wednesday")
+// so the placeholder message and the next-lesson label appear together in one card.
+private fun buildPlaceholderCardWithLabel(
+    placeholder: ScheduleItem.LessonItem,
+    label: String,
+    scope: androidx.wear.protolayout.material3.MaterialScope,
+    context: Context,
+    isLarge: Boolean,
+    onClick: ModifiersBuilders.Clickable
+): LayoutElementBuilders.LayoutElement = scope.run {
+    val colors = this.colorScheme
+
+    scope.card(
+        onClick = onClick,
+        width = DimensionBuilders.expand(),
+        height = DimensionBuilders.wrap(),
+        content = {
+            Column.Builder()
+                .setWidth(DimensionBuilders.expand())
+                .setHeight(DimensionBuilders.wrap())
+                // Placeholder title
+                .addContent(
+                    text(
+                        text = placeholder.lesson.name.layoutString,
+                        typography = if (isLarge) Typography.BODY_MEDIUM else Typography.BODY_SMALL,
+                        alignment = TEXT_ALIGN_CENTER,
+                        maxLines = 2
+                    )
+                )
+                .addContent(Spacer.Builder().setHeight(dp(6f)).build())
+                // Small label inside the same card
+                .addContent(
+                    text(
+                        text = label.layoutString,
+                        typography = Typography.LABEL_SMALL,
+                        color = colors.secondary
+                    )
+                )
+                .build()
+        }
+    )
+}
 
 
  private fun noDataLayout(
