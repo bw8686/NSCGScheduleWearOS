@@ -266,82 +266,106 @@ private fun tile(
             val firstEv = sorted.first()
             if (firstEv.startMillis > nowMillis) {
                 val todayDate = java.time.Instant.ofEpochMilli(nowMillis).atZone(zone).toLocalDate()
-                val lessonsToday = events.filter { it.kind == ScheduleMerger.Kind.LESSON && it.lesson != null }
-                    .filter { java.time.Instant.ofEpochMilli(it.startMillis).atZone(zone).toLocalDate() == todayDate }
 
-                // Debug: list which events were considered "today"
-                try {
-                    Log.d(TAG, "lessonsToday filtered count=${lessonsToday.size}")
-                    lessonsToday.forEachIndexed { idx, ev ->
-                        val startLocal = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone).toLocalDate()
-                        val startZ = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone)
-                        Log.d(TAG, "lessonsToday[$idx]: kind=${ev.kind} startLocal=$startLocal startZ=$startZ startMillis=${ev.startMillis} name=${ev.lesson?.name ?: "-"}")
+                // If the first event is later TODAY, show it (and the following
+                // event if present) instead of a placeholder message.
+                val firstEvDate = java.time.Instant.ofEpochMilli(firstEv.startMillis).atZone(zone).toLocalDate()
+                if (firstEvDate == todayDate) {
+                    val secondEv = sorted.getOrNull(1)
+                    val preGapRoot = scheduleMaterialLayout(
+                        context = context,
+                        deviceParameters = requestParams.deviceConfiguration!!,
+                        currentItem = toScheduleItem(firstEv),
+                        nextItem = secondEv?.let { toScheduleItem(it) },
+                        isCurrentActive = false
+                    )
+
+                    val preGapLayout = LayoutElementBuilders.Layout.Builder().setRoot(preGapRoot).build()
+                    val preGapEntry = TimelineBuilders.TimelineEntry.Builder().setLayout(preGapLayout)
+                    preGapEntry.setValidity(
+                        TimelineBuilders.TimeInterval.Builder()
+                            .setStartMillis(nowMillis)
+                            .setEndMillis(firstEv.startMillis)
+                            .build()
+                    )
+                    timelineBuilder.addTimelineEntry(preGapEntry.build())
+                } else {
+                    val lessonsToday = events.filter { it.kind == ScheduleMerger.Kind.LESSON && it.lesson != null }
+                        .filter { java.time.Instant.ofEpochMilli(it.startMillis).atZone(zone).toLocalDate() == todayDate }
+
+                    // Debug: list which events were considered "today"
+                    try {
+                        Log.d(TAG, "lessonsToday filtered count=${lessonsToday.size}")
+                        lessonsToday.forEachIndexed { idx, ev ->
+                            val startLocal = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone).toLocalDate()
+                            val startZ = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone)
+                            Log.d(TAG, "lessonsToday[$idx]: kind=${ev.kind} startLocal=$startLocal startZ=$startZ startMillis=${ev.startMillis} name=${ev.lesson?.name ?: "-"}")
+                        }
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Failed to log lessonsToday: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    Log.d(TAG, "Failed to log lessonsToday: ${e.message}")
+
+                    Log.d(TAG, "lessonsToday count=${lessonsToday.size} (pre-gap) todayStart=$dayStartMillis todayEnd=$todayOnlyEndMillis now=$nowMillis nextEvStart=${firstEv.startMillis}")
+
+                    val scheduledTodayInfo = countScheduledLessonsAndMaxEndMillis(timetable, todayDate, zone)
+                    Log.d(TAG, "scheduledToday count=${scheduledTodayInfo.first} maxEnd=${scheduledTodayInfo.second}")
+
+                    val message = when {
+                        scheduledTodayInfo.first == 0 -> "No lessons today!"
+                        scheduledTodayInfo.second != null && nowMillis > scheduledTodayInfo.second!! -> "Done for today!"
+                        else -> "You're done for now"
+                    }
+
+                    val currentPlaceholder = ScheduleItem.LessonItem(
+                        Lesson(
+                            name = message,
+                            startTime = "",
+                            endTime = "",
+                            room = "",
+                            teachers = emptyList(),
+                            course = "",
+                            group = ""
+                        ),
+                        openStartMillis = null,
+                        openEndMillis = null
+                    )
+
+                    // When there are no lessons today we still want to show the next
+                    // lesson (on a future day). Show the next card and label it with
+                    // the day of the next event.
+                    val showNextCard = true
+                    val nextDay = java.time.Instant.ofEpochMilli(firstEv.startMillis)
+                        .atZone(zone)
+                        .dayOfWeek
+                        .getDisplayName(TextStyle.FULL, Locale.getDefault())
+                    val nextLabelText = if (firstEv.kind == ScheduleMerger.Kind.LESSON) "Next lesson: $nextDay" else "Next: $nextDay"
+
+                    val preGapRoot = scheduleMaterialLayout(
+                        context = context,
+                        deviceParameters = requestParams.deviceConfiguration!!,
+                        currentItem = currentPlaceholder,
+                        nextItem = if (showNextCard) toScheduleItem(firstEv) else null,
+                        isCurrentActive = false,
+                        nextLabel = if (showNextCard) nextLabelText else null
+                    )
+
+                    val preGapLayout = LayoutElementBuilders.Layout.Builder().setRoot(preGapRoot).build()
+                    val preGapEntry = TimelineBuilders.TimelineEntry.Builder().setLayout(preGapLayout)
+                    preGapEntry.setValidity(
+                        TimelineBuilders.TimeInterval.Builder()
+                            .setStartMillis(nowMillis)
+                            .setEndMillis(firstEv.startMillis)
+                            .build()
+                    )
+                    timelineBuilder.addTimelineEntry(preGapEntry.build())
                 }
-
-                Log.d(TAG, "lessonsToday count=${lessonsToday.size} (pre-gap) todayStart=$dayStartMillis todayEnd=$todayOnlyEndMillis now=$nowMillis nextEvStart=${firstEv.startMillis}")
-
-                val scheduledTodayInfo = countScheduledLessonsAndMaxEndMillis(timetable, todayDate, zone)
-                Log.d(TAG, "scheduledToday count=${scheduledTodayInfo.first} maxEnd=${scheduledTodayInfo.second}")
-
-                val message = when {
-                    scheduledTodayInfo.first == 0 -> "No lessons today!"
-                    scheduledTodayInfo.second != null && nowMillis > scheduledTodayInfo.second!! -> "Done for today!"
-                    else -> "You're done for now"
-                }
-
-                val currentPlaceholder = ScheduleItem.LessonItem(
-                    Lesson(
-                        name = message,
-                        startTime = "",
-                        endTime = "",
-                        room = "",
-                        teachers = emptyList(),
-                        course = "",
-                        group = ""
-                    ),
-                    openStartMillis = null,
-                    openEndMillis = null
-                )
-
-
-                // When there are no lessons today we still want to show the next
-                // lesson (on a future day). Show the next card and label it with
-                // the day of the next event.
-                val showNextCard = true
-                val nextDay = java.time.Instant.ofEpochMilli(firstEv.startMillis)
-                    .atZone(zone)
-                    .dayOfWeek
-                    .getDisplayName(TextStyle.FULL, Locale.getDefault())
-                val nextLabelText = if (firstEv.kind == ScheduleMerger.Kind.LESSON) "Next lesson: $nextDay" else "Next: $nextDay"
-
-                val preGapRoot = scheduleMaterialLayout(
-                    context = context,
-                    deviceParameters = requestParams.deviceConfiguration!!,
-                    currentItem = currentPlaceholder,
-                    nextItem = if (showNextCard) toScheduleItem(firstEv) else null,
-                    isCurrentActive = false,
-                    nextLabel = if (showNextCard) nextLabelText else null
-                )
-
-                val preGapLayout = LayoutElementBuilders.Layout.Builder().setRoot(preGapRoot).build()
-                val preGapEntry = TimelineBuilders.TimelineEntry.Builder().setLayout(preGapLayout)
-                preGapEntry.setValidity(
-                    TimelineBuilders.TimeInterval.Builder()
-                        .setStartMillis(nowMillis)
-                        .setEndMillis(firstEv.startMillis)
-                        .build()
-                )
-                timelineBuilder.addTimelineEntry(preGapEntry.build())
             }
 
             for (i in sorted.indices) {
                 val ev = sorted[i]
                 val nextEv = sorted.getOrNull(i + 1)
 
-                // Entry for the event duration
+                // Entry for  the event duration
                 val eventRoot = scheduleMaterialLayout(
                     context = context,
                     deviceParameters = requestParams.deviceConfiguration!!,
@@ -365,65 +389,82 @@ private fun tile(
                 val gapEnd = nextEv?.startMillis ?: dayEndMillis
                 if (gapStart < gapEnd) {
                     val gapRoot = if (nextEv != null) {
-                            // Build a dynamic placeholder message depending on lessons for today
+                            // If the next event is later the SAME DAY, show the upcoming
+                            // lesson(s) instead of a placeholder message during the gap.
+                            val nextEvDate = java.time.Instant.ofEpochMilli(nextEv.startMillis).atZone(zone).toLocalDate()
                             val todayDate = java.time.Instant.ofEpochMilli(nowMillis).atZone(zone).toLocalDate()
-                            val lessonsToday = events.filter { it.kind == ScheduleMerger.Kind.LESSON && it.lesson != null }
-                                .filter { java.time.Instant.ofEpochMilli(it.startMillis).atZone(zone).toLocalDate() == todayDate }
 
-                            // Debug: list which events were considered "today" for this gap
-                            try {
-                                Log.d(TAG, "lessonsToday filtered count=${lessonsToday.size} (gap)")
-                                lessonsToday.forEachIndexed { idx, ev ->
-                                    val startLocal = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone).toLocalDate()
-                                    val startZ = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone)
-                                    Log.d(TAG, "lessonsToday(gap)[$idx]: kind=${ev.kind} startLocal=$startLocal startZ=$startZ startMillis=${ev.startMillis} name=${ev.lesson?.name ?: "-"}")
+                            if (nextEvDate == todayDate) {
+                                // Show the next event as the current card, and the following
+                                // event (if any) as the next card.
+                                val followingEv = sorted.getOrNull(i + 2)
+                                scheduleMaterialLayout(
+                                    context = context,
+                                    deviceParameters = requestParams.deviceConfiguration!!,
+                                    currentItem = toScheduleItem(nextEv),
+                                    nextItem = followingEv?.let { toScheduleItem(it) },
+                                    isCurrentActive = false
+                                )
+                            } else {
+                                // Build a dynamic placeholder message depending on lessons for today
+                                val lessonsToday = events.filter { it.kind == ScheduleMerger.Kind.LESSON && it.lesson != null }
+                                    .filter { java.time.Instant.ofEpochMilli(it.startMillis).atZone(zone).toLocalDate() == todayDate }
+
+                                // Debug: list which events were considered "today" for this gap
+                                try {
+                                    Log.d(TAG, "lessonsToday filtered count=${lessonsToday.size} (gap)")
+                                    lessonsToday.forEachIndexed { idx, ev ->
+                                        val startLocal = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone).toLocalDate()
+                                        val startZ = java.time.Instant.ofEpochMilli(ev.startMillis).atZone(zone)
+                                        Log.d(TAG, "lessonsToday(gap)[$idx]: kind=${ev.kind} startLocal=$startLocal startZ=$startZ startMillis=${ev.startMillis} name=${ev.lesson?.name ?: "-"}")
+                                    }
+                                } catch (e: Exception) {
+                                    Log.d(TAG, "Failed to log lessonsToday (gap): ${e.message}")
                                 }
-                            } catch (e: Exception) {
-                                Log.d(TAG, "Failed to log lessonsToday (gap): ${e.message}")
+
+                                Log.d(TAG, "lessonsToday count=${lessonsToday.size} todayStart=$dayStartMillis todayEnd=$todayOnlyEndMillis now=$nowMillis nextEvStart=${nextEv.startMillis}")
+
+                                val scheduledTodayInfo = countScheduledLessonsAndMaxEndMillis(timetable, todayDate, zone)
+                                Log.d(TAG, "scheduledToday count=${scheduledTodayInfo.first} maxEnd=${scheduledTodayInfo.second} (gap)")
+
+                                val message = when {
+                                    scheduledTodayInfo.first == 0 -> "No lessons today!"
+                                    scheduledTodayInfo.second != null && nowMillis > scheduledTodayInfo.second!! -> "Done for today!"
+                                    else -> "You're done for now"
+                                }
+
+                                val currentPlaceholder = ScheduleItem.LessonItem(
+                                    Lesson(
+                                        name = message,
+                                        startTime = "",
+                                        endTime = "",
+                                        room = "",
+                                        teachers = emptyList(),
+                                        course = "",
+                                        group = ""
+                                    ),
+                                    openStartMillis = null,
+                                    openEndMillis = null
+                                )
+
+                                // Show the next day's event even when there are no lessons
+                                // today, and label it with the weekday name.
+                                val showNextCard = true
+                                val nextDay = java.time.Instant.ofEpochMilli(nextEv.startMillis)
+                                    .atZone(zone)
+                                    .dayOfWeek
+                                    .getDisplayName(TextStyle.FULL, Locale.getDefault())
+                                val nextLabelText = if (nextEv.kind == ScheduleMerger.Kind.LESSON) "Next lesson: $nextDay" else "Next: $nextDay"
+
+                                scheduleMaterialLayout(
+                                    context = context,
+                                    deviceParameters = requestParams.deviceConfiguration!!,
+                                    currentItem = currentPlaceholder,
+                                    nextItem = if (showNextCard) toScheduleItem(nextEv) else null,
+                                    isCurrentActive = false,
+                                    nextLabel = if (showNextCard) nextLabelText else null
+                                )
                             }
-
-                            Log.d(TAG, "lessonsToday count=${lessonsToday.size} todayStart=$dayStartMillis todayEnd=$todayOnlyEndMillis now=$nowMillis nextEvStart=${nextEv.startMillis}")
-
-                            val scheduledTodayInfo = countScheduledLessonsAndMaxEndMillis(timetable, todayDate, zone)
-                            Log.d(TAG, "scheduledToday count=${scheduledTodayInfo.first} maxEnd=${scheduledTodayInfo.second} (gap)")
-
-                            val message = when {
-                                scheduledTodayInfo.first == 0 -> "No lessons today!"
-                                scheduledTodayInfo.second != null && nowMillis > scheduledTodayInfo.second!! -> "Done for today!"
-                                else -> "You're done for now"
-                            }
-
-                            val currentPlaceholder = ScheduleItem.LessonItem(
-                                Lesson(
-                                    name = message,
-                                    startTime = "",
-                                    endTime = "",
-                                    room = "",
-                                    teachers = emptyList(),
-                                    course = "",
-                                    group = ""
-                                ),
-                                openStartMillis = null,
-                                openEndMillis = null
-                            )
-
-                            // Show the next day's event even when there are no lessons
-                            // today, and label it with the weekday name.
-                            val showNextCard = true
-                            val nextDay = java.time.Instant.ofEpochMilli(nextEv.startMillis)
-                                .atZone(zone)
-                                .dayOfWeek
-                                .getDisplayName(TextStyle.FULL, Locale.getDefault())
-                            val nextLabelText = if (nextEv.kind == ScheduleMerger.Kind.LESSON) "Next lesson: $nextDay" else "Next: $nextDay"
-
-                            scheduleMaterialLayout(
-                                context = context,
-                                deviceParameters = requestParams.deviceConfiguration!!,
-                                currentItem = currentPlaceholder,
-                                nextItem = if (showNextCard) toScheduleItem(nextEv) else null,
-                                isCurrentActive = false,
-                                nextLabel = if (showNextCard) nextLabelText else null
-                            )
                         } else {
                             noDataMaterialLayout(requestParams, context)
                         }

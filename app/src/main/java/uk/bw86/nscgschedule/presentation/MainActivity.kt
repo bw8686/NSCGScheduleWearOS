@@ -473,7 +473,7 @@ fun TimetablePage(
         todayLessons.indexOfFirst { lesson ->
             val start = lesson.getParsedStartTime()
             val end = lesson.getParsedEndTime()
-            start != null && end != null && ((nowTime.isAfter(start) && nowTime.isBefore(end)) || (nowTime.isAfter(start.minusMinutes(5)) && nowTime.isBefore(end)))
+            start != null && end != null && ((nowTime.isAfter(start) && nowTime.isBefore(end)) || (nowTime.isAfter(start.minusMinutes(1)) && nowTime.isBefore(end)))
         }
     }
 
@@ -842,7 +842,7 @@ fun LessonCard(
     
     // Active if within lesson time or starting within 5 minutes (only check if today)
         val isActive = !isOverriddenByActiveExam && showToday && startTime != null && endTime != null &&
-            now.isAfter(startTime.minusMinutes(5)) && now.isBefore(endTime)
+            now.isAfter(startTime.minusMinutes(1)) && now.isBefore(endTime)
     
     val isUpcoming = showToday && startTime != null && startTime.isAfter(now)
     
