@@ -642,7 +642,7 @@ fun TimetablePage(
         item {
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = "Swipe for lessons →",
+                text = "Swipe for exams →",
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                 fontSize = 10.sp
             )
@@ -796,7 +796,7 @@ fun ExamsPage(
         item {
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = "← Swipe for exams",
+                text = "← Swipe for lessons",
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                 fontSize = 10.sp
             )
