@@ -769,7 +769,8 @@ fun ExamsPage(
             items(relevantExams.take(5)) { exam ->
                 ExamCard(
                     exam = exam,
-                    onClick = { selectedExam = exam }
+                    onClick = { selectedExam = exam },
+                    timeTick = minuteTick.value
                 )
             }
         }
@@ -924,7 +925,10 @@ fun LessonCard(
 }
 
 @Composable
-fun ExamCard(exam: Exam, onClick: () -> Unit = {}) {
+fun ExamCard(exam: Exam, onClick: () -> Unit = {}, timeTick: Int = 0) {
+    // `timeTick` is used to force recomposition each minute from the parent.
+    val _tickRef = timeTick
+    
     // Check if exam is upcoming to highlight it
     val now = java.time.LocalDateTime.now()
     val examDateTime = exam.getStartDateTime()
@@ -937,19 +941,22 @@ fun ExamCard(exam: Exam, onClick: () -> Unit = {}) {
             (now.isEqual(examDateTime) || now.isAfter(examDateTime)) && now.isBefore(examEndDateTime)
 
     val isUpcoming = examDateTime != null && examDateTime.isAfter(now)
-    val hoursUntil = if (isUpcoming && examDateTime != null) {
-        java.time.temporal.ChronoUnit.HOURS.between(now, examDateTime)
+    val minutesUntil = if (isUpcoming && examDateTime != null) {
+        java.time.temporal.ChronoUnit.MINUTES.between(now, examDateTime)
     } else null
+    
+    // Imminent should only show within 1 hour (60 minutes) of start time
+    val isImminent = isUpcoming && minutesUntil != null && minutesUntil < 60
     
     // Use Material ColorScheme - match lesson card style
     val cardColor = when {
         isActive -> MaterialTheme.colorScheme.primary
-        isUpcoming && hoursUntil != null && hoursUntil < 24 -> MaterialTheme.colorScheme.primaryContainer
+        isImminent -> MaterialTheme.colorScheme.primaryContainer
         else -> MaterialTheme.colorScheme.surfaceContainer
     }
-    val textColor = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-    val secondaryTextColor = if (isActive) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.95f) else MaterialTheme.colorScheme.onSurfaceVariant
-    val labelColor = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.secondary
+    val textColor = if (isActive || isImminent) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+    val secondaryTextColor = if (isActive || isImminent) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.95f) else MaterialTheme.colorScheme.onSurfaceVariant
+    val labelColor = if (isActive || isImminent) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.secondary
     
     Card(
         onClick = onClick,
@@ -989,11 +996,39 @@ fun ExamCard(exam: Exam, onClick: () -> Unit = {}) {
                     fontSize = 10.sp
                 )
                 
+                // Room with preroom arrow format if applicable
+                val roomDisplay = formatRoomWithPreroom(exam.examRoom, exam.preRoom)
                 Text(
-                    text = exam.examRoom,
+                    text = roomDisplay,
                     color = labelColor,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Medium
+                )
+            }
+            
+            // Bottom info section (countdown or seat number)
+            if (isActive) {
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = "NOW",
+                    color = labelColor,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            } else if (isUpcoming && minutesUntil != null && minutesUntil < 60) {
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = "in ${minutesUntil}m",
+                    color = labelColor,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            } else if (!exam.seatNumber.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = "Seat: ${exam.seatNumber}",
+                    color = secondaryTextColor,
+                    fontSize = 10.sp
                 )
             }
         }
@@ -1064,6 +1099,36 @@ fun ExamDetailsDialog(exam: Exam, onDismiss: () -> Unit) {
             }
         }
     )
+}
+
+/**
+ * Validates if preroom should be shown (not blank and less than 6 words)
+ */
+fun isValidPreroom(preroom: String?): Boolean {
+    if (preroom.isNullOrBlank()) return false
+    val wordCount = preroom.trim().split(Regex("\\s+")).size
+    return wordCount < 6
+}
+
+/**
+ * Extracts short room code (first token before space)
+ */
+fun extractRoomCode(room: String): String {
+    if (room.isBlank()) return ""
+    return room.trim().split(Regex("\\s+")).firstOrNull() ?: ""
+}
+
+/**
+ * Formats room display with arrow notation if preroom is valid
+ */
+fun formatRoomWithPreroom(room: String, preroom: String?): String {
+    return if (isValidPreroom(preroom)) {
+        val preCode = extractRoomCode(preroom!!)
+        val mainCode = extractRoomCode(room)
+        "Pre: $preCode → $mainCode"
+    } else {
+        room
+    }
 }
 
 @Composable

@@ -689,6 +689,7 @@ private fun buildExamCard(
     val colors = this.colorScheme
 
     val timeText = "${exam.startTime} - ${exam.finishTime}"
+    val roomText = formatRoomWithPreroom(exam.examRoom, exam.preRoom)
 
     val subjectTypography = if (isLarge) Typography.BODY_MEDIUM else Typography.BODY_SMALL
 
@@ -720,26 +721,23 @@ private fun buildExamCard(
                     )
                 )
                 .addContent(Spacer.Builder().setHeight(dp(4f)).build())
-                // Centered time and room
+                // Centered time
                 .addContent(
-                    Row.Builder()
-                        .setWidth(DimensionBuilders.expand())
-                        .addContent(
-                            text(
-                                text = timeText.layoutString,
-                                typography = Typography.LABEL_SMALL,
-                                alignment = TEXT_ALIGN_CENTER
-                            )
-                        )
-                        .addContent(Spacer.Builder().setWidth(dp(8f)).build())
-                        .addContent(
-                            text(
-                                text = exam.examRoom.layoutString,
-                                typography = Typography.LABEL_SMALL,
-                                alignment = TEXT_ALIGN_CENTER
-                            )
-                        )
-                        .build()
+                    text(
+                        text = timeText.layoutString,
+                        typography = Typography.LABEL_SMALL,
+                        alignment = TEXT_ALIGN_CENTER
+                    )
+                )
+                .addContent(Spacer.Builder().setHeight(dp(2f)).build())
+                // Centered room with preroom arrow format
+                .addContent(
+                    text(
+                        text = roomText.layoutString,
+                        typography = Typography.LABEL_SMALL,
+                        alignment = TEXT_ALIGN_CENTER,
+                        maxLines = 2
+                    )
                 )
                 .build()
         }
@@ -819,6 +817,37 @@ private fun logd(msg: String) {
 
     Log.d(TAG, msg)
 
+}
+
+/**
+ * Validates if preroom should be shown (not blank and less than 6 words)
+ */
+private fun isValidPreroom(preroom: String?): Boolean {
+    if (preroom.isNullOrBlank()) return false
+    val wordCount = preroom.trim().split(Regex("\\s+")).size
+    return wordCount < 6
+}
+
+/**
+ * Extracts short room code (first token before space)
+ */
+private fun extractRoomCode(room: String): String {
+    if (room.isBlank()) return ""
+    return room.trim().split(Regex("\\s+")).firstOrNull() ?: ""
+}
+
+/**
+ * Formats room display with arrow notation if preroom is valid
+ * Returns "Pre: A101 → IC203" if preroom valid, otherwise just the room
+ */
+private fun formatRoomWithPreroom(room: String, preroom: String?): String {
+    return if (isValidPreroom(preroom)) {
+        val preCode = extractRoomCode(preroom!!)
+        val mainCode = extractRoomCode(room)
+        "Pre: $preCode → $mainCode"
+    } else {
+        room
+    }
 }
 
 

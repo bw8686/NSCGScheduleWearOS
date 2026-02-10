@@ -184,7 +184,11 @@ object ScheduleMerger {
     ): List<DisplaySegment> {
         if (windowEndMillis <= windowStartMillis) return emptyList()
 
-        val bounds = mutableSetOf<Long>()
+        // Use a list so we do not deduplicate identical boundary points here.
+        // Deduplication of time points previously removed equal timestamps
+        // via `distinct()`; keep all insertions so downstream logic can
+        // reason about identical boundaries if necessary.
+        val bounds = mutableListOf<Long>()
         bounds.add(windowStartMillis)
         bounds.add(windowEndMillis)
 
@@ -195,7 +199,8 @@ object ScheduleMerger {
             if (e in windowStartMillis..windowEndMillis) bounds.add(e)
         }
 
-        val points = bounds.toList().distinct().sorted()
+        // Preserve potential duplicate boundary entries; sort to get ordered points.
+        val points = bounds.sorted()
         if (points.size < 2) return emptyList()
 
         val segments = mutableListOf<DisplaySegment>()

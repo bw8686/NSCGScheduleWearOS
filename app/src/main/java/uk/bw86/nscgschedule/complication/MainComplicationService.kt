@@ -146,16 +146,23 @@ class MainComplicationService : SuspendingTimelineComplicationDataSourceService(
             val cd: ComplicationData? = when (ev.kind) {
                 ScheduleMerger.Kind.EXAM -> when (request.complicationType) {
                     ComplicationType.SHORT_TEXT -> createShortTextData(
-                        text = getShortRoom(ev.exam?.examRoom ?: ""),
+                        text = formatRoomForComplication(ev.exam?.examRoom ?: "", ev.exam?.preRoom),
                         contentDescription = "Next exam: ${ev.exam?.subjectDescription} at ${ev.exam?.startTime} in ${ev.exam?.examRoom}",
                         validUntilMillis = null
                     )
-                    ComplicationType.LONG_TEXT -> createLongTextData(
-                        title = "EXAM - ${getShortRoom(ev.exam?.examRoom ?: "")}",
-                        text = "${ev.exam?.startTime}",
-                        contentDescription = "Next exam: ${ev.exam?.subjectDescription} at ${ev.exam?.startTime} in ${ev.exam?.examRoom}",
-                        validUntilMillis = null
-                    )
+                    ComplicationType.LONG_TEXT -> {
+                        val roomDisplay = if (isValidPreroom(ev.exam?.preRoom)) {
+                            "${extractRoomCode(ev.exam?.preRoom!!)}→${extractRoomCode(ev.exam?.examRoom ?: "")}"
+                        } else {
+                            getShortRoom(ev.exam?.examRoom ?: "")
+                        }
+                        createLongTextData(
+                            title = "EXAM - $roomDisplay",
+                            text = "${ev.exam?.startTime}",
+                            contentDescription = "Next exam: ${ev.exam?.subjectDescription} at ${ev.exam?.startTime} in ${ev.exam?.examRoom}",
+                            validUntilMillis = null
+                        )
+                    }
                     else -> null
                 }
                 ScheduleMerger.Kind.LESSON -> when (request.complicationType) {
@@ -331,5 +338,34 @@ class MainComplicationService : SuspendingTimelineComplicationDataSourceService(
         // Return only alphanumeric characters from the token to avoid punctuation
         val cleaned = token.filter { it.isLetterOrDigit() }
         return cleaned
+    }
+
+    /**
+     * Validates if preroom should be shown (not blank and less than 6 words)
+     */
+    private fun isValidPreroom(preroom: String?): Boolean {
+        if (preroom.isNullOrBlank()) return false
+        val wordCount = preroom.trim().split(Regex("\\s+")).size
+        return wordCount < 6
+    }
+
+    /**
+     * Extracts short room code (first token before space)
+     */
+    private fun extractRoomCode(room: String): String {
+        if (room.isBlank()) return ""
+        return room.trim().split(Regex("\\s+")).firstOrNull()?.filter { it.isLetterOrDigit() } ?: ""
+    }
+
+    /**
+     * Formats room display with preroom if valid (for complication)
+     * Returns just the preroom code if valid, otherwise the regular room
+     */
+    private fun formatRoomForComplication(room: String, preroom: String?): String {
+        return if (isValidPreroom(preroom)) {
+            extractRoomCode(preroom!!)
+        } else {
+            getShortRoom(room)
+        }
     }
 }
