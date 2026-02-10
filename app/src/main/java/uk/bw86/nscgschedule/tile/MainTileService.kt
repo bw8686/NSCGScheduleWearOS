@@ -688,8 +688,9 @@ private fun buildExamCard(
 
     val colors = this.colorScheme
 
-    val timeText = "${exam.startTime} - ${exam.finishTime}"
+    // Combine start time with room arrow format on one line
     val roomText = formatRoomWithPreroom(exam.examRoom, exam.preRoom)
+    val timeAndRoomText = "${exam.startTime} → $roomText"
 
     val subjectTypography = if (isLarge) Typography.BODY_MEDIUM else Typography.BODY_SMALL
 
@@ -721,22 +722,13 @@ private fun buildExamCard(
                     )
                 )
                 .addContent(Spacer.Builder().setHeight(dp(4f)).build())
-                // Centered time
+                // Centered time and room with arrow format (one line)
                 .addContent(
                     text(
-                        text = timeText.layoutString,
-                        typography = Typography.LABEL_SMALL,
-                        alignment = TEXT_ALIGN_CENTER
-                    )
-                )
-                .addContent(Spacer.Builder().setHeight(dp(2f)).build())
-                // Centered room with preroom arrow format
-                .addContent(
-                    text(
-                        text = roomText.layoutString,
+                        text = timeAndRoomText.layoutString,
                         typography = Typography.LABEL_SMALL,
                         alignment = TEXT_ALIGN_CENTER,
-                        maxLines = 2
+                        maxLines = 1
                     )
                 )
                 .build()
