@@ -1,6 +1,6 @@
-# NSCG Schedule Wear OS
+# NSCGSchedule Wear OS
 
-A companion Wear OS application for the NSCG Schedule app, providing glanceable timetable information and upcoming class alerts on your wrist.
+A companion Wear OS application for the NSCGSchedule app, providing glanceable timetable information and upcoming class alerts on your wrist.
 
 ## Overview
 - Displays current and upcoming lessons directly on Wear OS smartwatches.
